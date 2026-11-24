@@ -1,244 +1,300 @@
-自動売買AIシステム フェーズ0 設計仕様書（設計・市場選定・戦略仮説）
+自動売買AIシステム フェーズ0 設計仕様書（改訂版 v6：Phase 1-A〜1-D 着手準備完了版）
 作成日：2026-11-24
 準拠元：自動売買AIシステム 設計・実装仕様書（第3版 改訂3：外部調査反映・スリム版）
 
-本資料は、仕様書第7章および第11章に基づき、実装・コード生成・本番API接続を行わずにフェーズ0の設計事項をまとめたものである。初期MVPはバックテストとペーパートレードのみに限定し、優位性が確認できなければ「取引しない」「戦略を棄却する」を正しい結論とする。すべての外部仕様は2026-11-24時点の公式資料で確認した範囲と未確認事項を分離して記載する。
+本資料は、仕様書第7章および第11章に基づき、実装・コード生成・本番API接続を行わずにフェーズ0の設計事項を確定させるための改訂版（v6）である。初期MVPはバックテストとペーパートレードのみに限定し、優位性が確認できなければ「取引しない」「戦略を棄却する」を正しい結論とする。すべての外部仕様は2026-11-24時点の公式資料で確認した範囲と未確認事項を分離して記載する。
+
+========================================================================
+変更履歴（v5 -> v6：最終レビュー指摘の反映）
+========================================================================
+- 修正1（第4章(2)）：`alpha * recent_volume_5m` は実約定（板厚）再現ではなく「過去データ用の保守的な約定数量上限の近似モデル」と明記。約定数量と約定価格モデルを分離し、サイズ比例の市場インパクト（追加スリッページ）を定義。
+- 修正2（第3章(1)）：OHLCVのみしか存在しない期間は「最終的な戦略評価（Validation / OOS / Holdout）には使用しない」方針を明文化し、曖昧なペナルティ記述を廃止。
+- 修正3（第4章(3)）：`ActualPositionRisk` の誤判定を防ぐため、`RiskBudgetBeforeOrder` / `ReservedRiskForOrder` / `ActualPositionRisk` / `OtherOpenAndReservedRisk` を分離し、原子的差し替えと予約枠・総リスク上限との比較基準を確定。
+- 修正4（第3章(4)）：95%ブロックブートストラップの評価対象指標を「全費用控除後の1トレード当たり Net Expectancy（R倍数およびJPY純損益）」に固定。
+- 修正5（第8章）：Phase 1-A〜1-Dにおける実口座API・実注文機能の完全無効化・禁止を明記し、Emergency ReductionはPaper環境内の模擬実装に限定。
+- 修正6（第4章(3)）：複数約定イベントの時間差・逆順到着時における、`event_time` 順統合と加重平均取得価格・`Stop_0` の確定タイミングを定義。
 
 ========================================================================
 1. 初期MVPの推奨候補と根拠・未確認事項
 ========================================================================
 
-日本居住者が法規制・コスト・データ再現性・Sandbox有無の観点から初期MVPを1市場・1商品・1戦略・最大同時保有1ポジションに絞る場合、最有力候補は次の2案である（人間の承認前に確定しない）。
+日本居住者が法規制・コスト・データ再現性・Sandbox有無の観点から初期MVPを1市場・1商品・1戦略・最大同時保有1ポジションに絞る場合、候補は次の通りである（人間の承認前に確定しない）。
 
-[第一推奨] 暗号資産現物（GMOコイン取引所：BTC/JPY）
+[第一候補] 暗号資産現物（GMOコイン取引所：BTC/JPY）
 - 根拠：
-  1. 金融庁登録済みの国内暗号資産交換業者であり、日本円建てで会計・損益計算が単純。
-  2. 取引所現物でMakerマイナス手数料（-0.01%）、Taker 0.05%とコスト構造が明確。
-  3. Public APIおよび過去の約定履歴CSV（https://www.google.com/search?q=api.coin.z.com/data/trades/）が無料公開されており、Point-in-Timeに近いデータ収集が容易。
+  1. 金融庁登録済みの国内暗号資産交換業者であり、日本円建てで為替換算やレバレッジの複雑さを排除できる。
+  2. 取引所現物（BTC）はMaker -0.01%、Taker 0.05%と公式手数料が明確。最小注文数量 0.00001 BTC、最小注文単位 0.00001 BTC、最大注文数量 5 BTC、1日の最大ネット取引数量 100 BTC。成行注文の執行条件は FAK（Fill And Kill）。
+  3. 過去の約定履歴CSV（https://api.coin.z.com/data/trades/）およびPublic APIが無料公開されている。
 - 制約・未確認事項：
-  1. 公式のテストネット／Sandbox環境が提供されていないため、初期MVPのペーパートレードはローカルの擬似執行（Public WebSocket＋保守的約定モデル）で構築する必要がある。
-  2. 暗号資産の売買益は原則として雑所得（総合課税）となる。
-  3. 最小注文数量・数量刻み・定期メンテナンス時間帯の詳細は実装前に公式仕様で再確認が必要。
+  1. 公式のテストネット／Sandbox環境の有無は、今回確認した公式資料からは確定できないため「未確認」として扱う。ペーパートレードはローカルの擬似執行（Public WebSocket＋OrderBookモデル）で構築する。
+  2. 税務上の取り扱いは、国税庁「暗号資産等に関する税務上の取扱い及び計算書について」（https://www.nta.go.jp/publication/pamph/shotoku/kakuteishinkokukankei/kasoutuka/index.htm）およびFAQ（https://www.nta.go.jp/publication/pamph/pdf/virtual_currency_faq_03.pdf）を参照し、原則雑所得だが年間収入金額300万円超の場合の帳簿書類の保存状況等による事業所得等の区分も確認する（一律断定しない）。
 
-[第二推奨] 米国株・ETF（Alpaca Paper Trading API：SPY等）
-- 根拠：
-  1. メールアドレス登録のみで無料の公式Paper Trading専用環境（https://paper-api.alpaca.markets）を利用可能。
-  2. 無料のBasicデータプランでIEXリアルタイム市場データおよび過去データにアクセスでき、API結合テストの効率が高い。
-- 制約・未確認事項：
-  1. 日本居住者が将来ライブ口座を開設する際の審査要件、AlpacaJapanとの棲み分け、為替手数料、特定口座非対応（確定申告負荷）が未確認。
-  2. 無料IEXデータと有料SIPデータ（月額$99）の約定価格差・出来高網羅率の検証が必要。
+[第二候補] 米国株・ETF（Alpaca Paper Trading API：SPY等）
+- 用途の限定：
+  Alpacaの公式Paper Trading環境（https://docs.alpaca.markets/us/docs/paper-trading）は「API連携・注文状態管理・Paper実行フローの動作検証」としては有力だが、公式ドキュメントに明記されている通り、注文による市場インパクト、情報漏洩、レイテンシによるスリッページ、非成行指値の板キュー順位、価格改善、規制関連手数料、配当を再現しない。また注文数量が実際のNBBO数量で検証されず実際の流動性以上の約定が発生し得るほか、無料BasicデータはIEX中心で履歴API制限がある。したがって、Alpaca Paperの約定成績をそのまま実市場での戦略優位性の証拠として扱わない。
 
 ========================================================================
-2. 市場×商品×取引所／ブローカー×データ×戦略の候補比較（2026-11-24確認）
+2. 市場×商品×取引所／ブローカーの比較（2026-11-24公式確認）
 ========================================================================
 
 (1) 暗号資産現物（BTC/JPY）｜GMOコイン Crypto API
-- 公式URL：https://api.coin.z.com/docs/ ／ https://coin.z.com/jp/corp/guide/fees/
-- 手数料（確認範囲）：取引所現物 Maker -0.01% / Taker 0.05%（一部銘柄除く）。
-- Sandbox：公式テストネットなし（ローカル模擬執行で対応）。
-- 利用資格・環境：日本居住の個人口座開設が必要（Public APIと過去CSVは認証不要）。
-- 規制・税務・未確認：原則雑所得（総合課税）。最小注文数量・メンテナンス窓の詳細は未確認。
+- 公式URL：https://api.coin.z.com/docs/ ／ 取引ルール：https://coin.z.com/jp/corp/product/info/exchange/ ／ 手数料：https://coin.z.com/jp/corp/guide/fees/ ／ 履歴CSV：https://api.coin.z.com/data/trades/
+- 特徴：Maker -0.01% / Taker 0.05%、最小注文 0.00001 BTC、最大注文 5 BTC、成行注文はFAK。Taker手数料は小数点以下切り上げ、Makerは切り捨てで計算され、毎営業日（祝日含む）日本時間朝6:00に合算端数の整数部分が返金される。Sandbox有無は未確認。
 
 (2) 暗号資産現物・CFD（BTC/JPY, FX_BTC_JPY）｜bitFlyer Lightning API
 - 公式URL：https://lightning.bitflyer.com/docs ／ https://bitflyer.com/ja-jp/s/commission
-- 手数料（確認範囲）：CFDは取引手数料無料（SFD・Funding Rateあり）。現物は取引量連動。
-- Sandbox：API Playgroundあり。独立したテストネット口座の有無は未確認。
-- 利用資格・環境：HTTP API制限（同一IP・Private API 500件/5分、発注系300件/5分）、2FA連携あり。
-- 規制・税務・未確認：個人レバレッジ最大2倍（金商法上の暗号資産関連店頭デリバティブ）。API経由の現物手数料テーブル詳細は未確認。
+- 特徴：CFDは取引手数料無料（SFD・Funding Rateあり）。公式API Playgroundは本番環境であると明記されており、Sandboxとして扱ってはならない。独立テストネット有無は未確認。個人レバレッジ最大2倍。
 
 (3) 米国株・ETF（SPY等）｜Alpaca Trading API
 - 公式URL：https://docs.alpaca.markets/us/docs/paper-trading ／ https://docs.alpaca.markets/us/docs/about-market-data-api
-- 手数料（確認範囲）：米国株売買手数料 $0（リテール）、Basicデータ（IEX）$0、有料SIPデータ（Algo Trader Plus）$99/月。
-- Sandbox：公式Paper Trading環境あり（無料・無制限リセット可）。
-- 利用資格・環境：Paper専用口座は全世界からメールのみで開設可。
-- 規制・税務・未確認：日本居住者の米国ライブ口座開設要件・税務申告（特定口座非対応）は未確認。
+- 特徴：売買 $0、Basicデータ（IEX）$0、有料SIP（Algo Trader Plus）$99/月。Paper専用口座は全世界からメールのみで開設可（上記再現限界あり）。
 
-(4) 米国株・日本株・先物｜Interactive Brokers（IBSJ / TWS・Web API）
+(4) 米国株・日本株・先物｜Interactive Brokers（IBSJ）
 - 公式URL：https://www.interactivebrokers.co.jp/en/trading/tws.php
-- 手数料（確認範囲）：IBKR Pro米国株 $0.005/株（最低$1）等の従量制。市場データは取引所別課金。
-- Sandbox：公式Paper Trading口座あり（仮想資金$1,000,000）。
-- 利用資格・環境：日本法人IBSJ経由。TWSまたはIB Gatewayの起動常駐が必要。
-- 規制・税務・未確認：日本居住者向けIBSJ口座でのAPI利用可能銘柄・データ課金体系の詳細は未確認。
+- 特徴：TWS APIとClient Portal Web APIを分離し、採用候補はTWS API（IB Gateway常駐）とする。Paper口座（仮想資金$1,000,000）は実口座の取引権限やデータ購読設定と連動するため、IBSJ口座での実条件は別途確認する。
 
-(5) FX（USD/JPY）｜OANDA証券（REST API v20 / MT5標準API）
+(5) FX（USD/JPY）｜OANDA証券
 - 公式URL：https://www.oanda.jp/platform/api
-- 手数料（確認範囲）：取引手数料原則無料（スプレッド負担）。
-- Sandbox：デモ口座あり（ただしREST APIは本番口座の条件充足者のみ利用可）。
-- 利用資格・環境：REST APIは「NYサーバー・プロコース・口座残高25万円以上・Goldステータス」が必須。MT5標準APIは口座開設のみだがWindows環境必須。
-- 規制・税務・未確認：REST APIの履歴取得上限は直近2週間・最大5,000レコード。
+- 特徴：REST API（v20）はFX専用・NYサーバー・プロコース・残高25万円以上・Goldステータス必須（履歴上限2週間・5,000件）。MT5標準APIはFX＋CFD対応・口座開設のみだがWindows環境必須。
 
 (6) 日本株（現物・信用）｜三菱UFJ eスマート証券 kabuステーションAPI
 - 公式URL：https://kabu.com/item/kabustation_api/default.html
-- 手数料（確認範囲）：証券口座の売買手数料に準拠。API利用はProプラン以上適用で無料。
-- Sandbox：公式のAPI用デモ／フォワードテスト環境は未確認。
-- 利用資格・環境：Windows専用ソフト常駐必須・同時起動1台のみ・第三者作成プログラム利用禁止。
-- 規制・税務・未確認：Proプラン無料適用条件の最新基準・板情報取得上限の詳細は未確認。
+- 特徴：Windows専用ソフト常駐・Proプラン以上で無料。取得情報の第三者利用・再配信および第三者作成プログラムの利用制限があるため、独自開発プログラムの利用可否を契約上確認した後にのみ候補とする。API用デモ環境は未確認。
 
 ========================================================================
-3. 反証可能な初期戦略仮説（1つのみ事前登録）
+3. 初期戦略の再現可能な厳密仕様（F0-Strategy-002）
 ========================================================================
 
-戦略名（仮）：1時間足・ATR正規化ドンチャン・ブレイクアウト戦略
-- 対象市場・形態：単一市場・単一銘柄（例：BTC/JPY 現物、レバレッジなし、ロングのみ、最大同時保有1ポジション）。
-- ルール概要：
-  - 判断・執行周期：1時間足確定時点（UTC基準）。
-  - エントリー：終値が過去N本（探索候補：20〜48本）の最高値を上抜けた場合、次足始値または指値でエントリー。
-  - エグジット：エントリー時のATR(14)のk倍に基づく初期ストップ、トレーリングストップ、または最大保有時間（タイムストップ）到達で決済。
-- 理論的根拠：24時間市場におけるトレンド発生時の順張りフロー、参加者の損切り遅延や段階的参入による価格の自己相関（モメンタム効果）を捉える。
-- 必要データ：確定1時間足OHLCV（約定履歴から自社集計）、Bid/Askスプレッド実測値、Maker/Taker手数料率。
-- 反証条件（棄却基準）：
-  1. 往復Taker手数料（0.05%×2）および保守的スリッページ控除後のOOS期間Net Expectancyが0以下。
-  2. コスト2倍ストレステストで期待値がマイナスに転落。
-  3. 利益が特定の短期間または1〜2回の急騰イベントのみに依存。
-  上記いずれかに該当した場合、優位性なしと判断して本戦略を棄却する。
+旧戦略案（F0-Strategy-001：SMA20クロス等）がある場合は比較用ベースラインまたは別IDとして履歴保持し、黙って上書きしない。本仕様では既存ID「F0-Strategy-002」を維持し、新しい戦略IDを追加しない。
+
+戦略名：ドンチャン・ブレイクアウト＋ATRベースストップ戦略（F0-Strategy-002）
+- 対象市場・形態：BTC/JPY 現物（ロングのみ・レバレッジなし・最大同時保有1ポジション・利確TP条件なし）
+- 基準時刻・足確定：UTC 1時間足（確定足のみ参照し、未確定足は使用しない）
+
+(1) エントリー条件・使用データ限定・遅延考慮の執行タイミング
+- ブレイクアウト判定（t本目の1時間足確定時点で判定）：
+  Close_t > max(High_{t-N}, High_{t-N+1}, ..., High_{t-1})
+  ※現在の足 t の高値は参照期間に含めない。
+- 探索期間 N（事前登録）：{20, 24, 36, 48} の4通り。
+- 使用データの厳格限定（OHLCVのみ期間の除外）：
+  約定履歴CSV（ティック単位）が存在せず1時間足OHLCVのみしか存在しない期間は、**最終的な戦略評価（Validation / OOS / Holdout）には使用しない**。検証はGMOコインの約定履歴CSVが利用可能な期間に限定し、データ不足による約定価格の曖昧さを排除する。
+- 遅延を考慮したエントリー基準価格：
+  10:00足確定後、データ受信・品質検査・シグナル算出・Risk Gate審査・送信までの処理時間を考慮し、`available_at + order_latency_est` より後に到来する約定履歴CSV上の最初の約定価格を `RefPrice` とする（遅延シナリオ：`order_latency_est ∈ {1s, 5s, 30s, 60s}`）。指値エントリー案は執行特性が異なるため別戦略IDとする。
+
+(2) ATR(14)およびTrue Rangeの定義
+- True Range：TR_u = max(High_u - Low_u, |High_u - Close_{u-1}|, |Low_u - Close_{u-1}|)
+- ATR(14)：Wilder平滑化方式（初期14本は単純平均、以降 ATR_u = (ATR_{u-1} * 13 + TR_u) / 14）。
+- ストップ係数 k（事前登録）：{2.0, 2.5, 3.0} の3通り（N×k 計12通りを事前登録上限とする）。
+
+(3) ストップ処理・72時間決済の厳密な評価順序（先読み・時間矛盾の完全排除）
+初期ストップはエントリー約定完了時に加重平均取得価格基準で `Stop_0 = Position.avg_entry_price - k * ATR_t` として設定する。
+
+[エントリー足（t+1）におけるストップ判定の優先順位]
+エントリー前に発生した安値をエントリー後のストップ判定に使う時間的矛盾を禁止するため、以下を厳守する：
+  1. ティックデータ（約定履歴CSV）がある場合：実際の約定時刻（`FirstFillTime`）**以降**に記録された約定価格のみを対象として `price <= Stop_0` を判定する。
+  2. ティックデータがなく1時間足OHLCVのみの場合（補助確認時のみ）：エントリー足（t+1）のストップ判定は**保留**し、次の完全な足（t+2）の開始時点から `Stop_0` の到達判定を開始する。
+  3. 急落リスクの検証：エントリー直後の急落リスクを過小評価しないよう、別途ストレステストで不利側シナリオを検証・報告する。
+
+[保有中の足 u における評価順序]
+  Step 1（適用）：足 u の開始時点では、前足 u-1 確定時に決定していた `Stop_{u-1}` のみを適用する。
+  Step 2（ストップ到達判定）：足 u（または約定後ティック）で `Low <= Stop_{u-1}` となったか判定する。
+    - ギャップダウン（飛び越え）約定：`Open_u < Stop_{u-1}` で始まった場合、`Stop_{u-1}` ではなく `Open_u`（または利用可能最初の約定価格）を基準に売り約定モデルで決済する。
+    - 通常到達：`Open_u >= Stop_{u-1}` かつ `Low_u <= Stop_{u-1}` の場合、`Stop_{u-1}` を基準に売り約定モデルで決済する。
+  Step 3（72時間タイムストップ）：
+    `TimeStopAt = FirstFillTime + 72h` と定義する。Step 2で決済されずポジションが残っている場合、`TimeStopAt` 以降に利用可能となった最初の価格（`available_at >= TimeStopAt + order_latency_est`）を基準に成行売り（FAK）約定モデルで決済する。
+  Step 4（ストップ更新）：Step 2・3のいずれも未発動でポジションが残っている場合のみ、足 u の確定終値 `Close_u` と `ATR_u` を用いて `Stop_u = max(Stop_{u-1}, Close_u - k * ATR_u)` を計算する（上方のみ更新）。
+  Step 5（次足適用）：更新された `Stop_u` は次の足 u+1 から適用する。
+- 再エントリー許可：決済が発生した足では新規エントリーを行わず、次の確定足から通常のブレイクアウト判定を再開する。
+
+(4) Validationの統計的選択基準と検証回数制限・反証条件
+- 評価指標の固定：
+  **全費用控除後の1トレード当たり Net Expectancy（R倍数を主指標とし、JPY純損益も併記）**。
+- Validation選択基準：
+  事前登録した12通りのうち、最低取引回数（30回以上を足切り基準とするが、30回のみで十分な統計的検出力を保証するものではない）を満たし、かつ上記Net Expectancyの**95%ブロックブートストラップ信頼区間**（ブロック長は自己相関を考慮して事前登録する固定長または定常ブートストラップ、反復回数 `B >= 2,000`、シード固定）の下側信頼限界が最大の組合せを1つ選択する（信頼区間がゼロをまたぐ場合は採用不可・保留/棄却）。同値の場合は N が大きく k が大きい保守側を優先する。
+- 閲覧・検証回数制限：OOSは事前登録設定の検証用とし、最終Holdoutの実行は原則1回限りとする。
+- 反証条件：全費用控除後のOOS Net Expectancyが0以下、コスト2倍で期待値マイナス、または特定1〜2回の急騰のみに依存する場合は即座に棄却する。
 
 ========================================================================
-4. ニュース・マクロ指標のシャドーモード方針
+4. バックテスト約定モデル・FAK近似上限・数量計算・リスク整合（P0確定仕様）
 ========================================================================
 
-- 初期段階は完全なシャドーモード（監視・記録・事後分類のみ）とし、注文判断、ポジションサイズ、Risk Gate上限を一切変更しない。
-- ニュース・SNS・外部API応答はすべて信頼できないデータとして扱い、本文中の命令文を実行しない。構造化データ（記事ID、原典URL、発生/公開/取得/利用可能時刻、確認済み事実と推測の分離、重複排除）として保存する。
-- 米国マクロ経済時系列には改定前データ（vintage）を取得できるSt. Louis FedのALFRED API（https://fred.stlouisfed.org/docs/api/alfred.html）を補助候補とする。利用時はAPI規約に基づき以下を表示する：
-  "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis."
-- ニュースの追加価値は「ニュースなし基準戦略」と同一条件で比較し、Point-in-Timeデータがない過去期間については厳密なバックテストを主張せず前向きシャドー観測でデータを蓄積する。
+(1) 過去データ用FAK部分約定モデルとPaper Trading用モデルの分離
+GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量は即座に失効）であるため、両モデルを完全に分離し、**過去データ用近似モデルの結果と実板情報を使ったPaper Tradingの結果を混同しない**。
+
+[過去データ用：数量上限の近似モデル ＋ サイズ連動価格モデル（バックテスト専用）]
+- 位置づけの明記：`FillableCap = alpha * recent_volume_5m` は**実際の板厚や約定可能数量を再現するモデルではなく、過去データにおいて過大な数量を約定させないための保守的な数量上限の近似モデル**である（直前5分間の約定出来高は、注文時点の板残量と一致しないため）。
+- 出来高集計期間と単位：`recent_volume_5m`＝注文時刻直前5分間（300秒）にGMOコイン過去約定履歴CSVへ記録された全約定の合計BTC数量（`Decimal`）。
+- `alpha`（参加率上限）：初期仮定値 `alpha = 0.05`（5%）。ストレステストで `{0.01, 0.03, 0.05, 0.10}` を検証。
+- 欠損・ゼロ時の Fail-Closed：`recent_volume_5m` が欠損、品質不良、または `0` の場合は約定不可（新規エントリー見送り / SKIP）。
+- 約定数量モデル：
+  `filled_qty = floor_to_step(min(order_qty, FillableCap), step=0.00001 BTC)`。`filled_qty < 0.00001 BTC` なら約定ゼロ（SKIP）。残数量 `order_qty - filled_qty` はFAKにより即座に失効。
+- 約定価格モデル（約定数量モデルと分離・サイズ連動市場インパクト追加）：
+  `ImpactSlippage = Slippage_est * (1 + beta * (filled_qty / FillableCap))`
+  ※`HalfSpread_est = 0.03%`、`Slippage_est = 0.02%`、`beta = 1.0`、`GapBuffer = 0.5 * ATR_t` は実測値ではなく**設計上の初期仮定値**とし、2倍・3倍のストレステストを実施する。
+  - 成行買い：`ExecBuyPrice = RefPrice * (1 + HalfSpread_est + ImpactSlippage)`
+  - 成行売り：`ExecSellPrice = RefPrice * (1 - HalfSpread_est - ImpactSlippage)`
+
+[Paper Trading用：OrderBookモデル（ライブ模擬執行専用）]
+- 実際のOrderBookスナップショット（Public API/WebSocket）から各価格帯の利用可能数量を取得し、注文送信時点の板を消費して加重平均約定価格・約定数量・FAK残数量失効を算出する。想定約定価格と実板計算価格の乖離・板厚・Tickerを継続保存する。
+
+(2) 部分約定時のポジション管理・イベント到着順・リスク整合性
+- 単一ポジション管理：初期MVP（最大1ポジション）では **「加重平均取得価格による単一ポジション管理」** を採用する。
+- 時間差・逆順到着時のストップ確定ルール：
+  1. 最初の約定イベント到着時点（`FirstFillTime`）で暫定ポジションを作成し、その時点の加重平均取得価格で暫定 `Stop_0` を即時設定する。
+  2. 後続の約定イベントまたは注文終端状態（`FILLED` / `EXPIRED` / `CANCELED`）が到着した時点で、**取引所側の約定時刻（`event_time`）順に重複排除・統合して加重平均取得価格を再計算**し、`Stop_0` を最終確定値へ更新する（到着順と `event_time` が前後しても `event_time` 順で決定論的に一貫性を保つ）。
+- リスク比較基準の分離と原子的差し替え（誤判定の防止）：
+  - `RiskBudgetBeforeOrder`：注文前の利用可能リスク予算
+  - `ReservedRiskForOrder`：当該注文に割り当てた予約リスク（`<= RiskBudgetBeforeOrder`）
+  - `ActualPositionRisk`：実約定後のポジションリスク
+  - `OtherOpenAndReservedRisk`：当該注文を除く他のポジション・注文の総リスク
+  約定完了時、DBトランザクション内で予約枠 `ReservedRiskForOrder` を `ActualPositionRisk` へ**原子的に差し替える**。
+  超過判定は注文後の残余予算ではなく、**`ActualPositionRisk > ReservedRiskForOrder` または `(OtherOpenAndReservedRisk + ActualPositionRisk) > MaxTotalOpenRisk`** で行い、いずれかに該当した場合は `RiskState -> MANUAL_REVIEW_REQUIRED` を発動して新規エントリーを停止し人間へ通知する。
+
+(3) 手数料の理論値計算と端数処理（朝6:00返金モデル）
+- 理論手数料：`Fee_theoretical = ExecPrice * Qty * FeeRate`（成行買い・売りともにTaker前提 `0.0005` = 0.05%）。
+- 実請求・返金処理：Takerは小数点以下切り上げ（`ceil(Fee_theoretical)`）で控除、Makerは切り捨てで計算し、毎営業日（祝日含む）日本時間朝6:00（UTC 21:00）に合算端数の整数部分が返金される処理を会計・残高照合モデルで分離記録する。スプレッド・スリッページは二重控除しない。
+
+(4) 数量計算式（Decimal演算・分離された資金バッファ）
+1. 残余リスク予算：
+   `BaseRiskBudget = Equity * RiskRate`
+   `RiskBudgetBeforeOrder = max(0, min(BaseRiskBudget, MaxTotalOpenRisk - CurrentOpenAndReservedRisk))`
+   ※`RiskBudgetBeforeOrder <= 0` なら拒否。
+2. 1単位あたり想定最大損失（二重計上なし）：
+   `LossPerUnit = (EntryExecPrice - StopExitExecPrice) + EntryFeePerUnit + ExitFeePerUnit + GapBufferPerUnit`
+   ※`LossPerUnit <= 0` または `NaN` なら拒否。`GapBufferPerUnit` は追加ストレスバッファであり最大損失を保証するものではない。
+3. 理論数量：`QtyRaw = RiskBudgetBeforeOrder / LossPerUnit`
+4. 分離された資金上限と制約適用（成行買いTaker前提・Makerマイナス値使用禁止）：
+   - `ExchangeMarginFactor`：取引所注文余力倍率（例：GMOコイン取引ルール成行買余力条件 `1.1`、最新仕様を実装時確認）
+   - `EntryFeeRate`：Taker買い手数料率 `0.0005`（正の値）
+   - `SystemSafetyBuffer`：システム独自の資金余裕倍率（初期仮定値 `1.05`）
+   - `QtyCashCap = AvailableJPY / (EntryExecPrice * (1 + EntryFeeRate) * ExchangeMarginFactor * SystemSafetyBuffer)`
+   - `QtyMaxCap = min(5.0 BTC, FillableCap, MaxExposureQty)`
+   - `QtyCapped = min(QtyRaw, QtyCashCap, QtyMaxCap)`
+   - `QtyFinal = floor_to_step(QtyCapped, step=0.00001 BTC)`（切り上げ絶対禁止）
+   - `QtyFinal < 0.00001 BTC` なら見送り（SKIP）。
+   - 最終検算：`QtyFinal * LossPerUnit <= RiskBudgetBeforeOrder` を切り下げ後に再計算。手数料通貨（JPY）と数量通貨（BTC）を分離記録する。
 
 ========================================================================
-5. Research / Evaluator / Trading の責務・権限境界
+5. ニュース・マクロ指標のシャドーモード方針
 ========================================================================
 
-1. Research Plane（研究領域）
-   - 担当：データ収集・品質確認、仮説探索、IS/Validationバックテスト、Experiment Registry記録、LLMによる要約・仮説提案。
-   - 禁止：本番APIキー・注文API・出金機能・本番リスク設定へのアクセス、Trading Planeへの直接書き込み、最終ホールドアウト生データへのアクセス。
-
-2. Evaluator Plane（独立評価領域）
-   - 担当：固定されたMetrics Registry定義による損益・リスク指標の再計算、Backtest Engineとの整合性検査、OOSおよび最終ホールドアウトでの採用/保留/棄却判定。
-   - 保護：Research Agentから評価コード・指標式・採用基準を書き換え不可。最終ホールドアウトは読み取り専用領域に隔離し、実行回数・ハッシュ・結果を監査ログに記録。
-
-3. Trading Plane（ペーパートレード／将来の売買領域）
-   - 担当：ライブ市場データの品質検査、承認済み戦略の実行、SignalIntent生成、Fail-Closed Risk Gate、単一注文ライフサイクル主体への指示、口座照合、停止・保護。
-   - 境界：初期MVPはペーパートレード専用とし、本番移行は別工程で人間の明示的承認を必要とする。
-
-データフロー：
-Research Plane（探索・検証） -> Evaluator Plane（独立再計算・OOS/Holdout判定） -> 人間の明示的承認 -> Trading Plane（承認済み戦略 -> SignalIntent -> Fail-Closed Risk Gate -> 単一注文主体 -> 照合・Event Ledger）
+- 初期段階はシャドーモード（監視・記録・事後分類のみ）とし、注文判断・数量・Risk Gate上限を一切変更しない。
+- 外部ニュース・SNS・API応答は信頼できないデータとして扱い、本文中の命令文を実行しない。
+- 米国マクロ経済指標には改定前vintageを取得できるSt. Louis Fed ALFRED API（https://fred.stlouisfed.org/docs/api/alfred.html）を補助候補とし、利用時は規定表記 "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis." を含める。
 
 ========================================================================
-6. Risk Gate・損失制限・緊急停止・注文責任主体の設計
+6. 5 Plane アーキテクチャと LLM の権限境界
 ========================================================================
 
-- 初期モード：DRY_RUN=true、PAPER_TRADING=trueをデフォルトとし、単一フラグの変更だけで本番発注が有効にならない構造にする。秘密情報はOS Secret Store等で管理し、コード・Git・ログ・LLM入力へ含めない。
-- Fail-Closed Risk Gate：Risk Manager停止・タイムアウト・DB障害・残高/建玉/市場データの古化または照合未完了・署名不正・Nonce再利用・NaN/無限大等の異常時は、すべての新規エントリーを拒否する。
-- 1トレードリスクと上限（シミュレーション比較用仮定値）：
-  1トレード想定損失をEquityの0.1〜0.25%から検討（1.0%を自動採用しない）。手数料・スプレッド・スリッページ・最小数量・ロット刻みを含め、数量切り上げで予定リスクを超えてはならない。
-- 独立したエクスポージャー上限と停止条件（初期候補値）：
-  - 日次損失：当日基準Equityから -1.0%
-  - 週次損失：週初基準Equityから -2.5%
-  - 累積DD：-5.0%で警告・審査、-8.0%で新規取引停止
-  - 連敗：3連敗を初期検討例とし、損失額・執行品質と併せて検証
-  複数条件が競合する場合は最も厳しい停止条件を優先する。再開は時間経過だけで自動実行せず、原因解消・口座照合・人間の承認を必須とする。
-- 単一注文ライフサイクル責任主体：
-  外部エンジンまたは独自実装のどちらか一方のみが注文送信・取消・状態遷移を管理し、二重化しない。取引所／ブローカーの実口座状態を外部の正本とする。
-- 緊急減少専用経路（Emergency Reduction Executor）：
-  通常Risk Gate障害時も既存建玉の縮小のみ許可するため、EmergencyReductionAuthorization（口座・銘柄・サイド・最大数量・注文種別・期限・一意ID）を1回限り消費する経路を設ける。新規エントリー・反対建玉・符号反転は拒否し、reduce-only等の制約を確認できない場合は自動決済を無効化して人間へエスカレーションする。
-- Botから独立した緊急停止：
-  Bot・LLM・メインPC・メインネットワークが停止しても実行可能な別端末・別経路・手動手順を用意し、フェーズ3で訓練する。
+1. Research Plane：データ収集・品質検証、仮説探索、IS/Validationバックテスト、LLM要約・仮説提案。
+2. Evaluator Plane：固定Metrics Registry定義による再計算、整合性検査、OOSおよび隔離された読み取り専用Holdoutでの採用/保留/棄却判定。Research側から書換不可。
+3. Trading Plane：ライブデータ検査、承認済み戦略実行、SignalIntent生成、Fail-Closed Risk Gate、単一注文主体への指示、口座照合。初期MVPはペーパートレード専用。
+4. Transparency Plane：読み取り専用監査ログ、Event Ledger閲覧、Experiment/Evaluation結果・Strategy Healthレポート出力。発注・設定変更権限なし。
+5. Operations Plane：死活監視、リソース/APIレート/費用監視、日次暗号化バックアップと復元訓練、Bot外部キルスイッチ運用。
+
+[LLMの権限境界]
+- LLMは注文APIへアクセスできない。
+- LLMはRisk Gateの判断を上書きできない。
+- LLMはリスク設定・承認済み戦略・Evaluator基準を直接変更できない。
+- LLMの提案は人間による承認または決定論的な検証処理を経なければ採用されない。
 
 ========================================================================
-7. 注文状態・リスク予約・Event Ledger・Projection・復旧の設計
+7. 直交する状態機械と ERROR / UNKNOWN 境界・GMO API変換規則
 ========================================================================
 
-- 注文11状態：
-  CREATED -> SUBMITTING -> ACKNOWLEDGED -> PARTIALLY_FILLED / FILLED / CANCEL_PENDING / CANCELED / REJECTED / UNKNOWN / EXPIRED / ERROR
-- 原子的リスク予約と競合対策：
-  1. Risk Gateは許可発行前に口座・銘柄・サイド単位でリスク枠をDBトランザクション等で原子的に予約する（reservation_id, order_id, risk, notional, quantity, 有効期限を保持）。
-  2. 送信直前に口座残高・建玉・市場データの鮮度とバージョンを再検証し、上限超過のおそれがあれば許可を失効させる。
-  3. 送信結果UNKNOWN・タイムアウト時は予約を自動解放せず、外部口座・約定を照合し最終状態確定後に更新する。
-- Event LedgerとProjection：
-  観測したイベントを重複排除キー・取得時刻付きでEvent Ledgerに追記し、ローカルの注文・建玉・損益状態はEvent Ledgerと外部照合から再構築可能なProjectionとして扱う。
-- システム状態機械（16状態）と起動シーケンス：
-  起動・再接続時は INITIALIZING -> DATA_SYNCING -> RECONCILING -> READY -> PAPER_RUNNING / POSITION_OPEN の順に進み、外部口座との照合完了まで新規注文を許可しない。
-  停止・異常状態：COOLING_DOWN, DAILY_STOPPED, WEEKLY_STOPPED, DRAWDOWN_STOPPED, DATA_ERROR, API_ERROR, EXECUTION_UNKNOWN, EMERGENCY_STOPPED, MANUAL_REVIEW_REQUIRED。本番用のRUNNING状態は初期MVPから到達不能にする。
+(1) システム状態（相互に直交する4軸＋健全性フラグ）
+- ExecutionMode：RESEARCH / BACKTEST / PAPER（本番LIVEは初期MVPで到達不能）
+- RuntimeState：INITIALIZING -> DATA_SYNCING -> RECONCILING -> READY -> RUNNING / PAUSED / ERROR
+- RiskState：NORMAL / COOLING_DOWN / DAILY_STOPPED / WEEKLY_STOPPED / DRAWDOWN_STOPPED / EMERGENCY_STOPPED / MANUAL_REVIEW_REQUIRED
+- PositionState：FLAT / OPEN / PARTIALLY_CLOSED / UNKNOWN
+- 健全性フラグ：HEALTHY / DATA_ERROR / API_ERROR / EXECUTION_UNKNOWN
+
+(2) 注文状態機械（11状態）と SUBMITTING / ERROR / UNKNOWN の厳密な境界
+状態一覧：CREATED, SUBMITTING, ACKNOWLEDGED, PARTIALLY_FILLED, FILLED, CANCEL_PENDING, CANCELED, REJECTED, UNKNOWN, EXPIRED, ERROR
+- `SUBMITTING`：注文送信処理（外部APIへのHTTPリクエスト送信）を実行中である状態。
+- `ERROR`：送信処理開始「前」（`CREATED` 段階）のローカル検証失敗等のみ（予約即解放可）。
+- `UNKNOWN`：送信処理開始「後」（`SUBMITTING` 以降）の通信断・タイムアウト・応答消失・HTTP 5xx等（外部照合完了まで予約維持・盲目的再送禁止）。
+
+[許可される状態遷移（`SUBMITTING -> ERROR` を禁止）]
+- `CREATED -> SUBMITTING | ERROR`
+- `SUBMITTING -> ACKNOWLEDGED | FILLED | REJECTED | UNKNOWN`
+- `ACKNOWLEDGED -> PARTIALLY_FILLED | FILLED | CANCEL_PENDING | CANCELED | EXPIRED | UNKNOWN`
+- `PARTIALLY_FILLED -> PARTIALLY_FILLED | FILLED | CANCEL_PENDING | CANCELED | EXPIRED | UNKNOWN`
+- `CANCEL_PENDING -> CANCELED | PARTIALLY_FILLED | FILLED | ACKNOWLEDGED | UNKNOWN`（取消拒否時は `ACKNOWLEDGED` / `PARTIALLY_FILLED` へ復帰）
+- `UNKNOWN -> ACKNOWLEDGED | PARTIALLY_FILLED | FILLED | CANCELED | REJECTED | EXPIRED`
+- 終端状態：`FILLED`, `CANCELED`, `REJECTED`, `EXPIRED`, `ERROR`
+
+(3) GMOコインAPIステータスから内部11状態への変換規則（実装時公式スキーマ最終突合）
+- `WAITING` / `ORDERED` & `executedSize == 0` -> `ACKNOWLEDGED`
+- `WAITING` / `ORDERED` & `0 < executedSize < size` -> `PARTIALLY_FILLED`
+- `CANCELLING` -> `CANCEL_PENDING`
+- `EXECUTED` -> `FILLED`
+- `CANCELED` -> `CANCELED`（`executedSize > 0` 時は約定分をポジション移行し残予約のみ解放）
+- `EXPIRED` -> `EXPIRED`（`executedSize > 0` 時は約定分をポジション移行し残予約のみ解放）
 
 ========================================================================
-8. バックテスト・Evaluator・OOS・ホールドアウト・ペーパートレード検証計画
+8. Risk Gate・リスク予約・Emergency Reduction・実口座API禁止境界
 ========================================================================
 
-- 時系列分割：ランダムシャッフル禁止。IS（探索）、Validation、OOS、最終Holdoutを用途分離。最終Holdoutを見て変更した場合は再利用せず新しい独立期間を確保する。
-- バイアス検査：ルックアヘッド、未確定足、データ漏洩、サバイバーシップ、多重検定、タイムゾーン/夏時間ズレ、改定済み経済指標の先読みを検査。全試行（失敗含む）を保存する。
-- ストレステスト：通常コスト、コスト2倍、スプレッド/スリッページ拡大、遅延、部分約定、指値未約定、データ欠損、API障害、通信切断、注文結果UNKNOWN時の安全停止と復元を検証する。
-- 判定基準（採用候補 / 保留 / 棄却）：
-  採用候補には、事前登録順守、全費用控除後OOS Net Expectancyプラス、統計的不確実性の許容（信頼区間がゼロをまたがない等）、複数期間での再現、コスト耐性、実行可能性、前向きペーパートレード、重大な未解決事項ゼロのすべてを要求する。
+- **Phase 1-A〜1-D（およびPhase 1全体）における実口座API・実注文の完全禁止**：
+  Phase 1-A〜1-Dでは実口座APIへの接続、本番認証情報の読み込み、および実注文機能を完全に無効化・禁止する。実口座への接続・実注文機能は別フェーズ（フェーズ6の本番移行審査後、人間の明示的承認を得るまで）実装しない。
+- **Emergency Reduction Executorの適用範囲**：
+  通常Risk Gate停止時は、独立した「事前承認済みの決定論的Emergency Policyモジュール」が `EmergencyReductionAuthorization`（1回限り消費・有効期限付）を発行する。ただし**Phase 1〜2ではPaper環境／模擬口座アダプタ内での模擬実装に限定**する（現物向け `available_balance` 照合・反転/空売り禁止ロジックの単体テストおよびPaper統合テストのみ実施）。
+- **損失上限の計算定義**（数値候補：1トレード0.1〜0.25%、日次-1.0%、週次-2.5%、DD -5%警告/-8%停止、3連敗は未承認・仮定値）：
+  日次リセットはUTC 00:00、週次リセットは月曜UTC 00:00。実現損益＋未実現損益＋理論/実請求手数料＋スプレッド/スリッページ＋保有コストを含め、入出金・振替はDD（HWM基準）から厳密分離する。
+- **DB競合制御**：SQLiteは `BEGIN IMMEDIATE`、PostgreSQLは `SERIALIZABLE` または行ロック（`SELECT ... FOR UPDATE`）＋楽観ロック用バージョン番号＋一意制約 `UNIQUE(account_id, instrument, client_order_id)`。
 
 ========================================================================
-9. Strategy Health Monitor と相場環境分析の設計
+9. 実装基盤・データ契約（11種）・Event LedgerとProjection
 ========================================================================
 
-- 監視状態：HEALTHY / WATCH / STOP_NEW_ENTRIES / MANUAL_REVIEW_REQUIRED。WATCHは警告・追加監視のみを意味し、自動的なリスク変更や戦略切替を許可しない。
-- 5つの原因分類：アルファ劣化 / 執行劣化（スリッページ・拒否率等） / データ・システム障害 / 相場環境変化 / 判定不能（サンプル不足・データ不良・状態古化）。
-- 監視項目：Net Expectancyと信頼区間、R倍数、DD、連敗、スプレッド・スリッページ、約定率、遅延、拒否率、WebSocket gap。
-- 相場環境（Market Regime）：トレンド、レンジ、高/低ボラティリティ、流動性低下、重要イベント、UNKNOWN。初期は事後分析・説明用途のみとし、売買フィルター化は別仮説として事前登録・独立検証する。
+- 保存分離（軽量Python自作コア）：Parquet（履歴市場データ）＋ DuckDB（分析・バックテスト集計専用）＋ SQLite WAL（Paper用状態DB）＋ PostgreSQL（複数プロセス拡張時候補）＋ 追記専用監査ログ（ハッシュ連鎖）＋ OS Secret Store。
+- Event LedgerとProjection：Event Ledgerを「内部イベントの追記専用・改ざん検知可能な記録正本」とし、注文・ポジション・損益状態はすべてEvent Ledgerから決定論的に再構築可能なProjectionとする。
+- データ契約（全11種）：MarketEvent, DataQualityReport, SignalIntent, RiskDecision, RiskApprovedOrder, EmergencyReductionAuthorization, ExecutionEvent, AccountSnapshot, PositionSnapshot, ExperimentRecord, EvaluationRecord。
+- 共通メタデータ：`schema_version`, `event_id`, `created_at` (UTC), `event_time`, `received_at`, `available_at`, `source`, `source_event_id`, `correlation_id`, `normalization_version`, `raw_data_ref`, `quality_state`。価格・数量は `Decimal` 型。
 
 ========================================================================
-10. 採用エンジン・データ基盤・DB・実験管理・監視の候補比較
+10. 未解決事項・必須テスト・Phase 1 段階的進行計画
 ========================================================================
 
-- Freqtrade（https://www.freqtrade.io/en/stable/）
-  GPLv3。暗号資産の足ベース戦略・Dry-run・SQL永続化に対応。ただし独自Risk Gateとの単一責任分離を行う場合は内部注文管理との二重化に注意が必要。
-- Jesse（https://github.com/jesse-ai/jesse ／ https://docs.jesse.trade/docs/supported-exchanges/）
-  研究コアMIT、ライブ/Paperプラグインは有償アカウント制。国内取引所対応が乏しいため初期MVP候補からは劣後。
-- NautilusTrader（https://nautilustrader.io/docs/latest/concepts/overview/）
-  LGPL-3.0。Rustコア＋Pythonのイベント駆動エンジン。高精度執行に強みがあるが、国内暗号資産取引所アダプタの自作負荷・学習コストが初期MVPには重い。
-- 軽量Python自作コア（推奨候補）
-  Parquet + DuckDB（履歴分析）＋ SQLite WALモードまたはPostgreSQL（注文・予約・状態管理）＋ Pandera（スキーマ検証）。1戦略・1ポジションの初期MVPでは、Fail-Closed Risk Gate・注文状態機械・Event Ledgerをブラックボックスなしで単一責任実装できる。
-- 補助ツール：
-  vectorbt（Apache 2.0 + Commons Clause）は予備スクリーニング専用とし、最終採否判断に使わない。Evidently（Apache-2.0）は後期のドリフト監視補助候補。Qlib/RD-Agent/TradingAgents/hftbacktest/Kubernetes/Kafka等は初期MVPに導入しない。
+[明示する未解決事項]
+1. リスク率（0.1〜0.25%）および停止条件（-1.0% / -2.5% / -8.0% / 3連敗）の最終承認値（未承認・仮定候補のまま保留）。
+2. GMOコインAPIスキーマ細部（`cancelType` 列挙値、最新最小注文数量・余力倍率 `1.1`、メンテナンス時間帯）のPhase 1-C/Paper実装前最終確認。
+3. 過去データ用仮定値（`alpha=0.05`, `HalfSpread=0.03%`, `Slippage=0.02%`, `beta=1.0`, `GapBuffer=0.5*ATR`）のPaper実測データによる妥当性検証。
+4. 税務区分（雑所得／事業所得等）および記録保存要件の人間による個別確認。
+
+[Phase 1 の段階的進行順序]
+- Phase 1-A（データ基盤）：MarketEvent, DataQualityReport, Parquet保存, Point-in-Time時刻管理, GMOコイン過去CSV取込。
+- Phase 1-B（記録・評価基盤）：Event Ledger, Projection, ExperimentRecord, EvaluationRecord, 独立Evaluator骨格。
+- Phase 1-C（決定論的計算基盤）：Decimal数量計算, 手数料切り上げ/朝6時返金計算, Risk Gate（原子的予約差し替え・比較基準分離）, 注文状態機械, 過去データ用FAK数量上限近似シミュレーター（Paper模擬Emergency Reduction含む・実口座API完全無効）。
+- Phase 1-D（単体・統合テスト）：先読み排除、注文遅延、FAK部分約定＋欠損時Fail-Closed、サイズ比例スリッページ、予約/原子的差し替え/超過停止、逆順約定統合、`SUBMITTING`後`UNKNOWN`保持、再起動・復旧テスト。
+- Phase 1-E（戦略バックテスト）：1-A〜1-D全テスト合格後にのみ、F0-Strategy-002のValidation（95%ブロックブートストラップCI）/ OOS / 1回限りHoldout評価を実施。
 
 ========================================================================
-11. データ契約・秘密情報・ネットワーク・ライセンス・バックアップ・費用
+11. フェーズ0完了・人間の確認・承認事項（最大3点）
 ========================================================================
 
-- モジュール間データ契約（10種）：
-  共通メタデータ（schema_version, event_id, created_at, source, correlation_id）を付与し、価格・数量はDecimal、時刻はUTCで統一する。
-  MarketEvent, DataQualityReport, SignalIntent, RiskDecision, RiskApprovedOrder, EmergencyReductionAuthorization, ExecutionEvent, AccountSnapshot, PositionSnapshot, ExperimentRecord / EvaluationRecord。
-- 保存の分離：
-  市場履歴（Parquet）、取引状態DB（SQLite/PostgreSQL）、実験成果物（Experiment Registry）、監査ログ（追記専用）、秘密情報（OS Secret Store）。Data Manifestに取得元・規約URL・期間・粒度・品質検査・用途（IS/Val/OOS/Holdout）を記録する。
-- バックアップとRPO/RTO：
-  状態DB・設定・Data Manifestを日次暗号化バックアップし稼働ディスク外へ保管。初期目標：RPO 1時間以内、RTO 30分以内（フェーズ3で復元試験を実施）。
-- 費用見積：
-  ローカルPC＋無料データ前提ならAPI・データ費用は $0。常時稼働用VPSを利用する場合は月額約1,000〜3,000円程度（選択事項）。LLM要約を使う場合はトークン上限予算を設定する。
+本改訂版（v6）をもって、Phase 1-A〜1-D（基盤実装と単体・統合テスト）の着手承認をお願いいたします（Phase 1-E戦略評価および本番API接続・実注文は引き続き未承認）。
 
-========================================================================
-12. 不確実性、残存リスク、実装前の確認事項
-========================================================================
+1. 初期対象市場（GMOコイン BTC/JPY 現物）と近似・Paperモデル分離の承認：
+   過去データ用FAKモデルを「数量上限の近似モデル（`alpha=0.05`＋サイズ比例インパクト）」としてPaper用OrderBookモデルと明確に分離し、OHLCVのみ期間を戦略評価から除外する方針で確定してよろしいですか？
 
-1. ローカル擬似ペーパートレードでは、板の待ち行列順位・約定遅延・実スリッページ・API混雑時の挙動を完全再現できない。
-2. 国内暗号資産取引所は公式Sandboxが不在のため、将来の本番移行時には別工程での最小単位による疎通・保護注文挙動の確認が必須となる。
-3. 米国株（Alpaca）を選ぶ場合、日本居住者のライブ口座開設要件・税務処理（特定口座非対応）・為替コストが本番移行時の論点として残る。
-4. データ提供元・APIの利用規約や手数料体系は変更され得るため、フェーズ1着手前および本番審査前に必ず再確認する。
+2. 初期戦略仕様（F0-Strategy-002）と統計的選択基準の確定承認：
+   第3章の仕様（約定履歴CSV限定、エントリー足ストップ判定の時系列整合性、`TimeStopAt = FirstFillTime + 72h`、1トレード当たりNet Expectancyの95%ブロックブートストラップ下側CI選択基準）を確定してよろしいですか？
 
-========================================================================
-13. フェーズ0完了・人間の承認待ち事項（最大3点）
-========================================================================
-
-仕様書第7章および第11章に基づき、実装やAPI接続は行わずここで停止します。フェーズ1へ進むため、以下3点のご決定・ご承認をお願いいたします。
-
-1. 初期MVPの対象市場と検証環境（1つを選択）：
-   (1) 暗号資産現物（GMOコイン BTC/JPY：日本円建て・過去約定CSVあり・ローカル模擬ペーパートレード構成）
-   (2) 米国株ETF（Alpaca Paper Trading API / SPY等：公式Paper APIと無料IEXリアルタイムデータ利用可・将来ライブ移行時の居住者要件要確認）
-   どちらを初期対象としますか？
-
-2. 採用する実装アーキテクチャ方針：
-   初期MVPのバックテスト／ペーパートレード基盤は、単一責任・Fail-Closed Risk Gateを最小構成で実装できる「軽量Python自作コア（Parquet + DuckDB + SQLite）」で構築してよろしいですか？
-
-3. 初期戦略仮説と仮定パラメータの承認：
-   初期戦略仮説を「1時間足・ATR正規化ブレイクアウト（最大1ポジション）」、シミュレーション用仮定値を「1トレード想定リスク0.25%、日次-1.0% / 週次-2.5% / DD -8%停止」として事前登録し、フェーズ1（データ取得・バックテスト・独立Evaluator構築）へ進んでよろしいですか？
+3. Phase 1-A〜1-D（実口座API完全無効下での基盤実装とテスト）の着手承認：
+   リスク数値（0.25% / -1.0% / -2.5% / -8.0% / 3連敗）は仮定値のまま未承認・保留とし、実口座API・実注文を完全に無効化した状態で Phase 1-A〜1-D の実装に着手してよろしいですか？
 
 ========================================================================
 参照公式情報（2026-11-24確認）
 ========================================================================
 - GMOコイン Crypto API: https://api.coin.z.com/docs/
+- GMOコイン 取引ルール（現物・レバレッジ）: https://coin.z.com/jp/corp/product/info/exchange/
 - GMOコイン 手数料: https://coin.z.com/jp/corp/guide/fees/
+- GMOコイン API取引履歴ダウンロード: https://api.coin.z.com/data/trades/
+- 国税庁 暗号資産等に関する税務上の取扱い及び計算書について（令和7年12月）: https://www.nta.go.jp/publication/pamph/shotoku/kakuteishinkokukankei/kasoutuka/index.htm
+- 国税庁 暗号資産等に関する税務上の取扱いについて（FAQ）: https://www.nta.go.jp/publication/pamph/pdf/virtual_currency_faq_03.pdf
 - bitFlyer Lightning API: https://lightning.bitflyer.com/docs
-- bitFlyer 手数料一覧・税: https://bitflyer.com/ja-jp/s/commission
 - Alpaca Paper Trading: https://docs.alpaca.markets/us/docs/paper-trading
 - Alpaca Market Data API: https://docs.alpaca.markets/us/docs/about-market-data-api
 - Interactive Brokers TWS (IBSJ): https://www.interactivebrokers.co.jp/en/trading/tws.php
