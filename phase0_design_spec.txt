@@ -1,16 +1,16 @@
-自動売買AIシステム フェーズ0 設計仕様書（改訂版 v8：Phase 1-A〜1-D 完全確定版）
+自動売買AIシステム フェーズ0 設計仕様書（改訂版 v9：Phase 1-A〜1-D 実装前調整版）
 作成日：2026-11-24
 準拠元：自動売買AIシステム 設計・実装仕様書（第3版 改訂3：外部調査反映・スリム版）
 
-本資料は、仕様書第7章および第11章に基づき、実装・コード生成・本番API接続を行わずにフェーズ0の設計事項を確定させるための改訂版（v8）である。初期MVPはバックテストとペーパートレードのみに限定し、優位性が確認できなければ「取引しない」「戦略を棄却する」を正しい結論とする。すべての外部仕様は2026-11-24時点の公式資料で確認した範囲と未確認事項を分離して記載する。
+本資料は、仕様書第7章および第11章に基づき、実装・コード生成・本番API接続を行わずにフェーズ0の設計事項を整理するための改訂版（v9）である。初期MVPはバックテストとペーパートレードのみに限定し、優位性が確認できなければ「取引しない」「戦略を棄却する」を正しい結論とする。すべての外部仕様は2026-11-24時点の公式資料で確認した範囲と未確認事項を分離して記載する。
 
 ========================================================================
-変更履歴（v7 -> v8：残存P0・P1の完全解消）
+変更履歴（v8 -> v9：残存P0-1, P0-2 および P1-1, P1-2 の反映）
 ========================================================================
-- 修正1（第4章(2)・第9章）：約定イベントの重複排除キー `(exchange, account_id, instrument, source_execution_id)` とDB一意制約を定義し、同一約定ID再受信時の冪等処理（数量・価格・リスク不変＋監査ログ記録）を確定。
-- 修正2（第4章(2)）：部分約定時の予約リスク配分式（`ActualPositionRisk`, `RemainingReservedRisk`, `AllocatedInitialRiskForFilled`）をDecimal演算で決定論的に定義。
-- 修正3（第3章(4)）：Stationary Bootstrap `L=5` を主基準としつつ、事前登録した感度分析（`L ∈ {3, 5, 10}`）の併記義務を追加。
-- 修正4（第10章）：Phase 1-Dテストに重複受信・逆順到着・永久欠損・部分約定後取消と遅延通知・再起動直後重複の5項目を追加。
+- 修正1（P0-1 / 第7章・第4章(2)）：約定イベントの反映と注文状態遷移を分離。終端状態（`CANCELED` / `EXPIRED`）到達後に正当な遅延約定通知が届いた場合でも、約定を破棄せずEvent Ledger・ポジションへ冪等反映し、外部再照合・リスク再計算および必要時の補正遷移（`CANCELED -> FILLED` 等）を行う仕様を明文化。
+- 修正2（P0-2 / 第4章(2)）：`ActualPositionRisk` 算出式の全変数（`ActualStopExitPrice`, `ActualEntryFeePerUnit`, `ExitFeePerUnit`, `GapBufferPerUnit`）の単位・入力値・計算式をDecimal演算で完全定義し、部分約定時と全約定時で同一規則を適用。
+- 修正3（P1-1 / 第2章・第4章(3)）：GMOコインの手数料端数返金について公式表記と実装上の判定ルール（営業日／祝日／毎日差異の切り離し・集計期間・外部返金履歴との照合）を分離明記。
+- 修正4（P1-2 / 第3章(4)）：`L=5` が仮定値であることを明記し、`L ∈ {3, 5, 10}` の感度分析で結果が大きく変動する場合は「頑健性に疑問あり（保留／棄却検討）」と判定するルールを追加。
 
 ========================================================================
 1. 初期MVPの推奨候補と根拠・未確認事項
@@ -37,7 +37,7 @@
 
 (1) 暗号資産現物（BTC/JPY）｜GMOコイン Crypto API
 - 公式URL：https://api.coin.z.com/docs/ ／ 取引ルール：https://coin.z.com/jp/corp/product/info/exchange/ ／ 手数料：https://coin.z.com/jp/corp/guide/fees/ ／ 履歴CSV：https://api.coin.z.com/data/trades/
-- 特徴：Maker -0.01% / Taker 0.05%、最小注文 0.00001 BTC、最大注文 5 BTC、成行注文はFAK。Taker手数料は小数点以下切り上げ、Makerは切り捨てで計算され、毎営業日（祝日含む）日本時間朝6:00に合算端数の整数部分が返金される。Sandbox有無は未確認。
+- 特徴：Maker -0.01% / Taker 0.05%、最小注文 0.00001 BTC、最大注文 5 BTC、成行注文はFAK。Taker手数料の小数点以下切り上げ・Maker切り捨てと朝6:00端数返金仕様の詳細は第4章(3)に分離定義。Sandbox有無は未確認。
 
 (2) 暗号資産現物・CFD（BTC/JPY, FX_BTC_JPY）｜bitFlyer Lightning API
 - 公式URL：https://lightning.bitflyer.com/docs ／ https://bitflyer.com/ja-jp/s/commission
@@ -108,7 +108,7 @@
   **全費用控除後の1トレード当たり Net Expectancy（R倍数を主指標とし、JPY純損益も併記）**。
 - ブロックブートストラップ仕様（事前登録）：
   - 手法：**定常ブートストラップ（Stationary Bootstrap）**。
-  - 平均ブロック長：主基準 **`L = 5` トレード** を事前登録する。Validation閲覧後の事後変更・事後選択は禁止し、頑健性確認のため事前登録した感度分析（**`L ∈ {3, 5, 10}`**）の結果を最終評価レポートに必ず併記する。
+  - 平均ブロック長：`L = 5` トレードを**事前登録した仮定値（最適性が証明された値ではない）**として主基準に用いる。Validation閲覧後の事後変更・事後選択は禁止し、事前登録した感度分析（**`L ∈ {3, 5, 10}`**）の結果を最終評価レポートに必ず併記する。**`L` によって信頼区間下限や採否判定が大きく変動する場合は「戦略の頑健性に疑問あり」として保留または棄却を検討する**。
   - 信頼水準・反復回数・乱数：`95%`、反復回数 `B >= 2,000`、乱数シード固定。
 - 12通りの選択バイアス対策：
   1. 最低取引回数（30回以上を足切り基準とするが、30回のみで十分な統計的検出力を保証しない）を満たす候補から下側信頼限界最大の1案を「検証候補」として絞り込む（CIがゼロをまたぐ場合は採用不可）。同値時は N 大・k 大の保守側を優先。
@@ -116,7 +116,7 @@
   3. **最終採否は、Validationで固定した1設定のみを独立したOOSおよび1回限りの最終Holdoutへ持ち込んで再現性を確認すること**で判定する（Holdout閲覧後の変更は絶対禁止）。
 
 ========================================================================
-4. バックテスト約定モデル・重複排除・部分約定リスク配分式（P0確定仕様）
+4. バックテスト約定モデル・重複排除・実リスク定義（P0確定仕様）
 ========================================================================
 
 (1) 過去データ用FAK部分約定モデルとPaper Trading用モデルの分離
@@ -136,30 +136,47 @@ GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量�
 [Paper Trading用：OrderBookモデル（ライブ模擬執行専用）]
 - 実際のOrderBookスナップショット（Public API/WebSocket）から各価格帯の利用可能数量を取得し、注文送信時点の板を消費して加重平均約定価格・約定数量・FAK残数量失効を算出する。
 
-(2) 約定イベントの重複排除・時間的整合性・部分約定リスク配分式
+(2) 約定イベントの重複排除・取消後遅延約定・実リスク変数の完全定義
 - **約定イベントの重複排除キーと冪等処理**：
-  取引所が発行する一意の約定ID（`source_execution_id`）を必須保存し、DBスキーマ上で複合一意制約 **`UNIQUE(exchange, account_id, instrument, source_execution_id)`** を強制する。
-  同一の約定IDが再受信された場合、システムはべき等に処理し、**ポジション数量、加重平均取得価格、手数料、リスク予約を一切変更せず**、重複受信を検出した事実（元 `event_id` と再受信 `received_at`）を監査ログへ記録する。
+  取引所発行の一意約定ID（`source_execution_id`）を必須保存し、DB複合一意制約 **`UNIQUE(exchange, account_id, instrument, source_execution_id)`** を強制する。同一約定IDの再受信時は冪等に処理し、**ポジション数量・加重平均取得価格・手数料・リスク予約を一切変更せず**、重複検出事実（元 `event_id` と再受信 `received_at`）を監査ログへ記録する。
+- **約定イベント反映と注文状態遷移の分離（取消後遅延約定への対応）**：
+  終端状態（`CANCELED` / `EXPIRED`）到達後であっても、未登録の正当な約定イベントを受信した場合は破棄せず、Event LedgerとポジションProjectionへ冪等に反映し、第7章(2)の外部再照合・リスク再計算を実行する。
 - 単一ポジション管理と遡及変更の禁止：
-  初期MVP（最大1ポジション）では「加重平均取得価格による単一ポジション管理」を採用する。約定イベントの統合は `event_time` 順で決定論的に行うが、ストップ適用履歴は各判定時点の `received_at` スナップショットとして不変記録し、遅延・逆順到着したイベントによる再計算は**過去の実行済みストップ判定を遡って書き換えず、現在以降（`received_at` 以降の次回評価タイミング）の状態および `Stop` 価格にのみ反映**する。
-- **部分約定時の予約リスク配分式（すべてDecimal演算・DBトランザクション内原子的更新）**：
-  発注前に確保する初期予約：
-  - `InitialOrderQty = QtyFinal`
-  - `InitialReservedPerUnit = LossPerUnit`（`EntryExecPrice - StopExitExecPrice + EntryFeePerUnit + ExitFeePerUnit + GapBufferPerUnit`）
-  - `ReservedRiskForOrder_initial = InitialOrderQty * InitialReservedPerUnit`
-  部分約定イベント到着時（累計約定数量 `filled_qty`、未約定残数量 `remaining_qty = InitialOrderQty - filled_qty`）：
-  1. **約定済み分の実リスク再計算**：実際の加重平均取得価格 `avg_entry_price` と、それに基づくストップ `Stop_0 = avg_entry_price - k * ATR_t`（売り約定モデル適用後の `ActualStopExitPrice`）、実約定手数料、`GapBufferPerUnit` を用いて算出：
-     `ActualPositionRisk = filled_qty * ((avg_entry_price - ActualStopExitPrice) + ActualEntryFeePerUnit + ExitFeePerUnit + GapBufferPerUnit)`
-  2. **未約定残分の予約リスク配分**：発注前に確保した単価あたりの予約リスク `InitialReservedPerUnit` を用いて未約定残数量分を保持：
-     `RemainingReservedRisk = remaining_qty * InitialReservedPerUnit`
-  3. **約定済み分の割当予約超過チェック**：
-     当該約定済み数量に割り当てられていた初期予約枠は `AllocatedInitialRiskForFilled = filled_qty * InitialReservedPerUnit`。
-     **`ActualPositionRisk > AllocatedInitialRiskForFilled`** または **`(OtherOpenAndReservedRisk + ActualPositionRisk + RemainingReservedRisk) > MaxTotalOpenRisk`** のいずれかを満たした場合は超過を検出し、即座に `RiskState -> MANUAL_REVIEW_REQUIRED` を発動して新規エントリーを停止し人間へ通知する。
-  4. **注文の取消・失効・拒否時**：`remaining_qty = 0`（`RemainingReservedRisk = 0`）として未約定分の予約のみを解放し、`ActualPositionRisk` のみを保持する。
+  初期MVP（最大1ポジション）では「加重平均取得価格による単一ポジション管理」を採用する。約定イベント統合は `event_time` 順で行うが、ストップ適用履歴は各判定時点の `received_at` スナップショットとして不変記録し、遅延・逆順到着イベントによる再計算は**過去の実行済みストップ判定を遡って書き換えず、現在以降（`received_at` 以降の次回評価タイミング）の状態および `Stop` 価格にのみ反映**する。
 
-(3) 手数料の理論値計算と端数処理（朝6:00返金モデル）
+- **部分約定時・全約定時共通の実リスク計算定義（すべてDecimal演算）**：
+  発注前に確保する初期予約：
+  - `InitialOrderQty = QtyFinal`（単位：BTC）
+  - `InitialReservedPerUnit = LossPerUnit`（単位：JPY/BTC）
+  - `ReservedRiskForOrder_initial = InitialOrderQty * InitialReservedPerUnit`（単位：JPY）
+  部分約定イベント到着時・全約定時共通で、累計約定数量 `filled_qty`（BTC）、未約定残数量 `remaining_qty = InitialOrderQty - filled_qty`（BTC）に対し、以下を決定論的に算出する：
+  1. `avg_entry_price`（JPY/BTC）：`sum(fill_price_i * fill_qty_i) / filled_qty`
+  2. `Stop_0`（JPY/BTC）：`avg_entry_price - k * ATR_t`（`ATR_t` はエントリーシグナル確定足 `t` のWilder ATR(14)）
+  3. `ActualStopExitPrice`（JPY/BTC）：ストップ価格 `Stop_0` に売り成行約定モデルを適用した想定売却単価：
+     `ActualStopExitPrice = Stop_0 * (1 - HalfSpread_est - ImpactSlippage_for_filled)`
+     （ここで `ImpactSlippage_for_filled = Slippage_est * (1 + beta * (filled_qty / FillableCap))`、過去CSV無しのPaper時は `FillableCap` の代わりに注文時OrderBookまたは `Slippage_est` 基準の共通決定論的式を適用）
+  4. `ActualEntryFeePerUnit`（JPY/BTC）：累計実約定手数料（JPY）を累計約定数量で除した単価：
+     `ActualEntryFeePerUnit = sum(actual_entry_fee_jpy_i) / filled_qty`
+  5. `ExitFeePerUnit`（JPY/BTC）：上記 `ActualStopExitPrice` を基準にTaker手数料率を乗じた想定決済手数料単価：
+     `ExitFeePerUnit = ActualStopExitPrice * TakerFeeRate`（`TakerFeeRate = 0.0005`）
+  6. `GapBufferPerUnit`（JPY/BTC）：シグナル確定足 `t` の `ATR_t` に係数 `g`（初期仮定値 `0.5`）を乗じた追加バッファ単価：
+     `GapBufferPerUnit = g * ATR_t`
+  7. **実リスク確定式（JPY）**：
+     `ActualPositionRisk = filled_qty * ((avg_entry_price - ActualStopExitPrice) + ActualEntryFeePerUnit + ExitFeePerUnit + GapBufferPerUnit)`
+  8. **未約定残分の予約リスク配分（JPY）**：
+     `RemainingReservedRisk = remaining_qty * InitialReservedPerUnit`
+  9. **割当予約超過チェック**：
+     `AllocatedInitialRiskForFilled = filled_qty * InitialReservedPerUnit` とし、
+     **`ActualPositionRisk > AllocatedInitialRiskForFilled`** または **`(OtherOpenAndReservedRisk + ActualPositionRisk + RemainingReservedRisk) > MaxTotalOpenRisk`** となった場合は超過と判定し、即座に `RiskState -> MANUAL_REVIEW_REQUIRED` を発動して新規エントリーを停止する。
+  10. **取消・失効・拒否時**：`remaining_qty = 0`（`RemainingReservedRisk = 0`）として未約定分のみ解放し、`ActualPositionRisk` のみを保持する。
+
+(3) 手数料の理論値計算と端数処理・朝6:00返金ロジックの分離
 - 理論手数料：`Fee_theoretical = ExecPrice * Qty * FeeRate`（成行買い・売りともにTaker前提 `0.0005` = 0.05%）。
-- 実請求・返金処理：Takerは小数点以下切り上げ（`ceil(Fee_theoretical)`）で控除、Makerは切り捨てで計算し、毎営業日（祝日含む）日本時間朝6:00（UTC 21:00）に合算端数の整数部分が返金される処理を会計・残高照合モデルで分離記録する。スプレッド・スリッページは二重控除しない。
+- 実請求・返金仕様の分離：
+  GMOコインの公式取引ルール（https://coin.z.com/jp/corp/product/info/exchange/）では「Taker注文は約定時に小数点以下切り上げ、Maker注文は切り捨てで発生し、毎営業日（祝日含む）日本時間朝6:00に銘柄ごとに合算され整数部分が返金される」と記載されている。
+  プログラム仕様上、「営業日」と「祝日を含む毎日」の判定差異（土日返金の有無）を曖昧にしないため、以下を分離設計する：
+  - **約定時**：Taker手数料を `ceil(Fee_theoretical)`（1円未満切り上げ）で残高控除し、切り上げ端数 `ceil(Fee_theoretical) - Fee_theoretical` を銘柄別未返金プールに記録する。
+  - **返金処理（独立モジュール）**：対象集計期間を「前回返金時刻（6:00 JST）〜当日5:59:59 JST」とし、銘柄別に合算した端数の整数部分 `floor(sum_fraction)` を返金予定額として計算する。土日における返金実施有無は実装前のAPI照合／実取引履歴の観測で確定し、Paper・ライブ照合時は外部口座の返金入金イベントを正本として突合する。
 
 (4) 数量計算式（Decimal演算・分離された資金バッファ）
 1. 残余リスク予算：
@@ -203,7 +220,7 @@ GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量�
 - LLMの提案は人間による承認または決定論的な検証処理を経なければ採用されない。
 
 ========================================================================
-7. 直交する状態機械と ERROR / UNKNOWN 境界・GMO API変換規則
+7. 直交する状態機械と取消後遅延約定への対応
 ========================================================================
 
 (1) システム状態（相互に直交する4軸＋健全性フラグ）
@@ -213,20 +230,26 @@ GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量�
 - PositionState：FLAT / OPEN / PARTIALLY_CLOSED / UNKNOWN
 - 健全性フラグ：HEALTHY / DATA_ERROR / API_ERROR / EXECUTION_UNKNOWN
 
-(2) 注文状態機械（11状態）と SUBMITTING / ERROR / UNKNOWN の厳密な境界
+(2) 注文状態機械（11状態）と約定反映・状態遷移の分離
 状態一覧：CREATED, SUBMITTING, ACKNOWLEDGED, PARTIALLY_FILLED, FILLED, CANCEL_PENDING, CANCELED, REJECTED, UNKNOWN, EXPIRED, ERROR
 - `SUBMITTING`：注文送信処理（外部APIへのHTTPリクエスト送信）を実行中である状態。
 - `ERROR`：送信処理開始「前」（`CREATED` 段階）のローカル検証失敗等のみ（予約即解放可）。
 - `UNKNOWN`：送信処理開始「後」（`SUBMITTING` 以降）の通信断・タイムアウト・応答消失・HTTP 5xx等（外部照合完了まで予約維持・盲目的再送禁止）。
 
-[許可される状態遷移（`SUBMITTING -> ERROR` を禁止）]
+[許可される状態遷移]
 - `CREATED -> SUBMITTING | ERROR`
 - `SUBMITTING -> ACKNOWLEDGED | FILLED | REJECTED | UNKNOWN`
 - `ACKNOWLEDGED -> PARTIALLY_FILLED | FILLED | CANCEL_PENDING | CANCELED | EXPIRED | UNKNOWN`
 - `PARTIALLY_FILLED -> PARTIALLY_FILLED | FILLED | CANCEL_PENDING | CANCELED | EXPIRED | UNKNOWN`
 - `CANCEL_PENDING -> CANCELED | PARTIALLY_FILLED | FILLED | ACKNOWLEDGED | UNKNOWN`
 - `UNKNOWN -> ACKNOWLEDGED | PARTIALLY_FILLED | FILLED | CANCELED | REJECTED | EXPIRED`
-- 終端状態：`FILLED`, `CANCELED`, `REJECTED`, `EXPIRED`, `ERROR`
+
+[終端状態（`CANCELED` / `EXPIRED`）後に遅延約定通知が届いた場合の処理]
+約定イベントの受信・反映は注文状態遷移と分離し、終端状態到達後でも正当な未処理約定イベント（`source_execution_id` 未登録）は破棄しない：
+  1. Event LedgerおよびポジションProjectionへ冪等に反映し、`filled_qty` と `avg_entry_price` を更新する。
+  2. 取引所との再照合（`RECONCILING`）を実行して最終約定数量を確定する。
+  3. 全量約定が判明した場合は例外補正遷移 **`CANCELED -> FILLED`** または **`EXPIRED -> FILLED`**（`RECONCILED_FILL` イベント）を許可して記録する。一部約定のまま残分取消済みであれば注文状態は `CANCELED` / `EXPIRED` のまま確定約定数量を更新し、監査ログへ記録する。
+  4. 更新後の `filled_qty` に基づき第4章(2)の `ActualPositionRisk` を再計算する。すでに残予約を解放済みであった場合も含め、総リスクが上限または割当予約を超過した際は即座に `RiskState -> MANUAL_REVIEW_REQUIRED` を発動し新規エントリーを停止する。
 
 (3) GMOコインAPIステータスから内部11状態への変換規則（実装時公式スキーマ最終突合）
 - `WAITING` / `ORDERED` & `executedSize == 0` -> `ACKNOWLEDGED`
@@ -263,21 +286,20 @@ GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量�
 
 [明示する未解決事項]
 1. リスク率（0.1〜0.25%）および停止条件（-1.0% / -2.5% / -8.0% / 3連敗）の最終承認値（未承認・仮定候補のまま保留）。
-2. GMOコインAPIスキーマ細部（`cancelType` 列挙値、最新最小注文数量・余力倍率 `1.1`、メンテナンス時間帯）のPhase 1-C/Paper実装前最終確認。
+2. GMOコインAPIスキーマ細部（`cancelType` 列挙値、最新最小注文数量・余力倍率 `1.1`、朝6:00端数返金の土日挙動、メンテナンス時間帯）のPhase 1-C/Paper実装前最終確認。
 3. 過去データ用仮定値（`alpha=0.05`, `HalfSpread=0.03%`, `Slippage=0.02%`, `beta=1.0`, `GapBuffer=0.5*ATR`）のPaper実測データによる妥当性検証・校正。
 4. 税務区分（雑所得／事業所得等）および記録保存要件の人間による個別確認。
 
 [Phase 1 の段階的進行順序]
 - Phase 1-A（データ基盤）：MarketEvent, DataQualityReport, Parquet保存, Point-in-Time時刻管理, GMOコイン過去CSV取込。
 - Phase 1-B（記録・評価基盤）：Event Ledger, Projection, ExperimentRecord, EvaluationRecord, 独立Evaluator骨格。
-- Phase 1-C（決定論的計算基盤）：Decimal数量計算, 手数料切り上げ/朝6時返金計算, Risk Gate（部分約定ごとの配分式・原子的更新・重複排除）, 注文状態機械, 過去データ用FAK数量上限近似シミュレーター（Paper模擬Emergency Reduction含む・実口座API完全無効）。
+- Phase 1-C（決定論的計算基盤）：Decimal数量計算, 手数料切り上げ/朝6時返金モジュール, Risk Gate（`ActualPositionRisk` 完全定義・原子的更新・重複排除）, 注文状態機械（取消後遅延約定の補正対応含む）, 過去データ用FAK数量上限近似シミュレーター（Paper模擬Emergency Reduction含む・実口座API完全無効）。
 - Phase 1-D（単体・統合テスト）：
-  基本テストに加え、以下の異常系・部分約定強化テストを必須実施する：
   - 先読み排除、注文遅延、FAK部分約定＋欠損時Fail-Closed、サイズ比例スリッページ
   - **同一約定イベントの重複受信**（数量・価格・リスク不変＋監査ログ記録）
   - **異なる約定イベントの逆順到着**（`event_time` 順統合＋過去ストップ判定不変）
   - **一部イベントの永久欠損**（注文終端・外部照合での補完と整合）
-  - **部分約定後の取消と遅延約定通知の競合**（`CANCEL_PENDING` 遷移＋未約定分のみ解放）
+  - **部分約定後の取消完了後に遅延約定通知が届く競合**（約定反映＋外部再照合＋リスク再計算・超過停止）
   - **再起動直後に重複イベントが届くケース**（Projection再構築＋冪等性維持）
   - `SUBMITTING` 後 `UNKNOWN` 保持、現物Emergency Reduction残高上限テスト
 - Phase 1-E（戦略バックテスト）：1-A〜1-D全テスト合格後にのみ、F0-Strategy-002のValidation（定常ブートストラップ L=5, B>=2,000, L∈{3,5,10}感度分析併記）/ OOS / 1回限りHoldout評価を実施。
@@ -286,15 +308,15 @@ GMOコイン現物の成行注文は FAK（一部約定後、未執行残数量�
 11. フェーズ0完了・人間の確認・承認事項（最大3点）
 ========================================================================
 
-本改訂版（v8）をもって、Phase 1-A〜1-D（基盤実装と単体・統合テスト）の着手承認をお願いいたします（Phase 1-E戦略評価および本番API接続・実注文は引き続き未承認）。
+本改訂版（v9）をもって、Phase 1-A〜1-D（基盤実装と単体・統合テスト）の着手承認をお願いいたします（Phase 1-E戦略評価および本番API接続・実注文は引き続き未承認）。
 
 1. 初期対象市場（GMOコイン BTC/JPY 現物）と近似・Paperモデル分離の承認：
    過去データ用FAKモデルを「数量上限の近似モデル（`alpha=0.05`＋サイズ比例インパクト近似）」としてPaper用OrderBookモデルと明確に分離し、OHLCVのみ期間を戦略評価から除外する方針で確定してよろしいですか？
 
-2. 初期戦略仕様（F0-Strategy-002）と選択バイアス・感度分析対策の確定承認：
-   第3章の仕様（約定履歴CSV限定、エントリー足ストップ判定の時系列整合性、`TimeStopAt = FirstFillTime + 72h`、定常ブートストラップ L=5・B>=2,000・L∈{3,5,10}感度分析併記＋OOS/Holdout独立検証）を確定してよろしいですか？
+2. 初期戦略仕様（F0-Strategy-002）と感度分析ルールの確定承認：
+   第3章の仕様（約定履歴CSV限定、エントリー足ストップ判定の時系列整合性、`TimeStopAt = FirstFillTime + 72h`、定常ブートストラップ L=5・B>=2,000・L∈{3,5,10}感度分析と頑健性判定＋OOS/Holdout独立検証）を確定してよろしいですか？
 
-3. Phase 1-A〜1-D（重複排除・部分約定リスク配分式を含む基盤実装とテスト）の着手承認：
+3. Phase 1-A〜1-D（重複排除・部分約定実リスク定義・取消後遅延約定対応を含む基盤実装とテスト）の着手承認：
    リスク数値（0.25% / -1.0% / -2.5% / -8.0% / 3連敗）は仮定値のまま未承認・保留とし、実口座API・実注文を完全に無効化した状態で Phase 1-A〜1-D の実装に着手してよろしいですか？
 
 ========================================================================
